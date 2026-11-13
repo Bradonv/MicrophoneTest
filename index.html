@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two-Mic Direction Finder</title>
+<style>
+:root{
+  /* layout: one narrow instrument column. Dial and angle first, then readouts, correlation trace, settings, diagnostics. */
+  --bg:#eef1f0; --panel:#ffffff; --ink:#14201d; --muted:#586763; --line:#d3dbd8;
+  --accent:#0a7a62; --warn:#b0500f;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1514; --panel:#18211f; --ink:#e6eeeb; --muted:#93a39e; --line:#2c3936;
+    --accent:#3fc9a8; --warn:#f0a35e; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1514; --panel:#18211f; --ink:#e6eeeb; --muted:#93a39e; --line:#2c3936;
+  --accent:#3fc9a8; --warn:#f0a35e; color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.45}
+main{max-width:520px;margin:0 auto;padding:20px 16px 40px;display:flex;flex-direction:column;gap:16px}
+h1{font-size:1.35rem;line-height:1.2;margin:0;text-wrap:balance}
+h2{font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:600}
+p{margin:0}
+.lead{color:var(--muted);font-size:.95rem}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:12px}
+canvas{display:block;width:100%}
+#dial{height:210px}
+#corr,#fileplot{height:120px}
+.angle{font-family:var(--mono);font-size:2.6rem;line-height:1;font-variant-numeric:tabular-nums}
+.toward{color:var(--muted);font-size:.95rem;min-height:1.4em}
+.status{font-size:.95rem}
+.status.warn{color:var(--warn)}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{font:inherit;font-weight:600;padding:12px 18px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--panel);cursor:pointer}
+button.secondary{background:transparent;color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+label{font-size:.95rem}
+.check{display:flex;gap:8px;align-items:flex-start}
+.check input{width:20px;height:20px;margin:2px 0 0;accent-color:var(--accent)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cell{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.cell span{display:block;font-size:.75rem;color:var(--muted)}
+.cell b{font-family:var(--mono);font-weight:500;font-size:1.05rem;font-variant-numeric:tabular-nums}
+.field{display:flex;flex-direction:column;gap:4px}
+input[type=number]{font:inherit;font-family:var(--mono);padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);width:140px}
+input[type=file]{font:inherit;max-width:100%}
+.small{font-size:.85rem;color:var(--muted)}
+ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+pre{margin:0;font-family:var(--mono);font-size:.8rem;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Two-mic direction finder</h1>
+    <p class="lead">Measures which of the phone's two microphones hears a sound first and turns that delay into an angle.</p>
+  </header>
+
+  <section class="panel" aria-label="Direction">
+    <canvas id="dial" role="img" aria-label="Dial showing the direction of the last sound"></canvas>
+    <div>
+      <div class="angle" id="angle">--°</div>
+      <div class="toward" id="toward"></div>
+    </div>
+    <p class="status" id="status" aria-live="polite">Tap Start listening and allow microphone access.</p>
+    <div class="row">
+      <button id="start" type="button">Start listening</button>
+      <button id="stop" type="button" class="secondary" disabled>Stop</button>
+    </div>
+    <label class="check"><input type="checkbox" id="mirror"><span>Mirror the dial. Tick this if the needle moves away from the sound.</span></label>
+  </section>
+
+  <section class="panel" aria-label="Readouts">
+    <h2>Readouts</h2>
+    <div class="grid">
+      <div class="cell"><span>Delay between mics</span><b id="rDelay">--</b></div>
+      <div class="cell"><span>Confidence</span><b id="rConf">--</b></div>
+      <div class="cell"><span>Level, channel 1</span><b id="rL1">--</b></div>
+      <div class="cell"><span>Level, channel 2</span><b id="rL2">--</b></div>
+    </div>
+    <canvas id="corr" role="img" aria-label="Cross-correlation between the two channels against delay"></canvas>
+    <p class="small">Cross-correlation against delay. One sharp peak means a clean reading; a flat or lumpy trace means echo or noise.</p>
+  </section>
+
+  <section class="panel" aria-label="Settings">
+    <h2>Settings</h2>
+    <div class="field">
+      <label for="spacing">Distance between the two microphones, in mm</label>
+      <input type="number" id="spacing" min="10" max="400" step="1" value="150" inputmode="numeric">
+      <span class="small">Usually top edge to bottom edge of the phone. If readings pin at 90°, this number is too small.</span>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Analyse a recording">
+    <h2>Analyse a recording instead</h2>
+    <p class="small">If live listening is unavailable, record a stereo file with a recorder app set to raw or unprocessed stereo, then choose it here. The first 60 seconds are analysed.</p>
+    <input type="file" id="file" accept="audio/*,.wav,.m4a,.flac,.ogg">
+    <canvas id="fileplot" role="img" aria-label="Angle against time for the recording" hidden></canvas>
+    <p class="status" id="fileStatus" aria-live="polite"></p>
+  </section>
+
+  <section class="panel" aria-label="What the browser delivered">
+    <h2>What the browser delivered</h2>
+    <pre id="diag">Not started.</pre>
+  </section>
+
+  <section class="panel" aria-label="How to use">
+    <h2>How to use</h2>
+    <ul>
+      <li>Hold the phone so the line between its microphones runs left to right, and keep fingers off the microphone holes.</li>
+      <li>Use sharp, broadband sounds: claps, finger snaps, keys, speech. Steady tones above about 1 kHz give false readings.</li>
+      <li>0° means the sound is square-on to the phone. 90° means it is in line with the two microphones.</li>
+      <li>Two microphones cannot tell front from back, or above from below. Turn the phone and read again to narrow it down.</li>
+      <li>Live listening only works when this page is opened over HTTPS or from localhost.</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/*DSP-START*/
+var SOUND = 343, N = 4096, UP = 4, M = N * UP, F_LO = 300, F_HI = 6000;
+
+function makeFFT(n){
+  var bits = Math.round(Math.log2(n)), rev = new Uint32Array(n), i, j, b;
+  for (i = 0; i < n; i++){ j = 0; for (b = 0; b < bits; b++) if (i & (1 << b)) j |= 1 << (bits - 1 - b); rev[i] = j; }
+  var cs = new Float64Array(n / 2), sn = new Float64Array(n / 2);
+  for (i = 0; i < n / 2; i++){ cs[i] = Math.cos(2 * Math.PI * i / n); sn[i] = Math.sin(2 * Math.PI * i / n); }
+  return function(re, im, inverse){
+    var i, j, k, t, size, half, step, a, b, wr, wi, tr, ti;
+    for (i = 0; i < n; i++){ j = rev[i]; if (j > i){ t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (size = 2; size <= n; size <<= 1){
+      half = size >> 1; step = n / size;
+      for (i = 0; i < n; i += size){
+        for (j = 0, k = 0; j < half; j++, k += step){
+          wr = cs[k]; wi = inverse ? sn[k] : -sn[k];
+          a = i + j; b = a + half;
+          tr = re[b] * wr - im[b] * wi; ti = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        }
+      }
+    }
+    if (inverse) for (i = 0; i < n; i++){ re[i] /= n; im[i] /= n; }
+  };
+}
+var fftN = makeFFT(N), fftM = makeFFT(M);
+var hann = new Float64Array(N);
+for (var hi = 0; hi < N; hi++) hann[hi] = 0.5 - 0.5 * Math.cos(2 * Math.PI * hi / (N - 1));
+var re1 = new Float64Array(N), im1 = new Float64Array(N), re2 = new Float64Array(N), im2 = new Float64Array(N);
+var bigRe = new Float64Array(M), bigIm = new Float64Array(M);
+
+/* a, b: N samples from channel 1 and 2 starting at offset. Returns delay of channel 1 relative to channel 2 (seconds). */
+function analyse(a, b, offset, fs, spacingM){
+  var i, sa = 0, sb = 0, sd = 0, x, y;
+  for (i = 0; i < N; i++){
+    x = a[offset + i]; y = b[offset + i];
+    sa += x * x; sb += y * y; sd += (x - y) * (x - y);
+    re1[i] = x * hann[i]; im1[i] = 0; re2[i] = y * hann[i]; im2[i] = 0;
+  }
+  var out = { rms1: Math.sqrt(sa / N), rms2: Math.sqrt(sb / N), mono: (sa + sb) > 0 && sd < 1e-6 * (sa + sb),
+              tau: 0, conf: 0, corr: null, L: 0 };
+  fftN(re1, im1, false); fftN(re2, im2, false);
+  bigRe.fill(0); bigIm.fill(0);
+  var kLo = Math.max(1, Math.ceil(F_LO * N / fs)), kHi = Math.min(Math.floor(F_HI * N / fs), N / 2 - 1), nb = 0, k, cr, ci, mag;
+  for (k = kLo; k <= kHi; k++){
+    cr = re1[k] * re2[k] + im1[k] * im2[k];
+    ci = im1[k] * re2[k] - re1[k] * im2[k];
+    mag = Math.sqrt(cr * cr + ci * ci);
+    if (mag > 1e-14){ cr /= mag; ci /= mag; bigRe[k] = cr; bigIm[k] = ci; bigRe[M - k] = cr; bigIm[M - k] = -ci; nb++; }
+  }
+  if (!nb) return out;
+  fftM(bigRe, bigIm, true);
+  var L = Math.min(Math.ceil(spacingM / SOUND * fs * UP * 1.2) + 2 * UP, M / 2 - 2), norm = 2 * nb / M;
+  var corr = new Float32Array(2 * L + 1), best = -Infinity, bl = 0, lag, v;
+  for (lag = -L; lag <= L; lag++){
+    v = bigRe[(lag + M) % M] / norm; corr[lag + L] = v;
+    if (v > best){ best = v; bl = lag; }
+  }
+  var off = 0;
+  if (bl > -L && bl < L){
+    var y0 = corr[bl + L - 1], y1 = corr[bl + L], y2 = corr[bl + L + 1], den = y0 - 2 * y1 + y2;
+    if (den !== 0) off = Math.max(-0.5, Math.min(0.5, 0.5 * (y0 - y2) / den));
+  }
+  out.tau = (bl + off) / (UP * fs); out.conf = best; out.corr = corr; out.L = L;
+  return out;
+}
+
+function tauToAngle(tau, spacingM){
+  var s = tau * SOUND / spacingM, over = Math.abs(s) > 1.05;
+  s = Math.max(-1, Math.min(1, s));
+  return { deg: Math.asin(s) * 180 / Math.PI, over: over };
+}
+function median(arr){
+  var s = arr.slice().sort(function(p, q){ return p - q; }), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+/*DSP-END*/
+
+var MIN_RMS = 0.001, MIN_CONF = 0.25;
+var $ = function(id){ return document.getElementById(id); };
+var els = { dial: $('dial'), corr: $('corr'), angle: $('angle'), toward: $('toward'), status: $('status'),
+  start: $('start'), stop: $('stop'), mirror: $('mirror'), spacing: $('spacing'), diag: $('diag'),
+  rDelay: $('rDelay'), rConf: $('rConf'), rL1: $('rL1'), rL2: $('rL2'),
+  file: $('file'), fileplot: $('fileplot'), fileStatus: $('fileStatus') };
+
+var ctx = null, stream = null, proc = null, src = null, sink = null;
+var recent = [], shown = null, lastValid = 0, lastCorr = null, lastL = 0, fsNow = 48000, running = false;
+
+function spacingM(){
+  var v = parseFloat(els.spacing.value);
+  if (!(v >= 10)) v = 150;
+  return Math.min(v, 400) / 1000;
+}
+function setStatus(text, warn){ els.status.textContent = text; els.status.className = 'status' + (warn ? ' warn' : ''); }
+function db(r){ return r > 0 ? (20 * Math.log10(r)).toFixed(0) + ' dBFS' : 'silent'; }
+function tok(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function fit(c){
+  var r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  var w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
+  if (c.width !== w || c.height !== h){ c.width = w; c.height = h; }
+  var g = c.getContext('2d'); g.setTransform(d, 0, 0, d, 0, 0);
+  return { g: g, w: r.width, h: r.height };
+}
+
+function drawDial(){
+  var f = fit(els.dial), g = f.g, w = f.w, h = f.h;
+  var ink = tok('--ink'), muted = tok('--muted'), line = tok('--line'), accent = tok('--accent');
+  g.clearRect(0, 0, w, h);
+  var cx = w / 2, cy = h - 30, R = Math.min(w / 2 - 34, h - 56), a, t, x, y;
+  g.lineWidth = 2; g.strokeStyle = line;
+  g.beginPath(); g.arc(cx, cy, R, Math.PI, 2 * Math.PI); g.stroke();
+  g.font = '12px ' + tok('--sans'); g.fillStyle = muted; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (a = -90; a <= 90; a += 30){
+    t = a * Math.PI / 180; x = Math.sin(t); y = -Math.cos(t);
+    g.beginPath(); g.moveTo(cx + x * (R - 7), cy + y * (R - 7)); g.lineTo(cx + x * R, cy + y * R); g.stroke();
+    g.fillText((a > 0 ? '+' : '') + a + '°', cx + x * (R + 18), cy + y * (R + 14));
+  }
+  /* the phone: a bar along the microphone axis */
+  g.strokeStyle = muted; g.lineWidth = 6; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(cx - 34, cy); g.lineTo(cx + 34, cy); g.stroke();
+  g.fillStyle = muted; g.fillText('phone, mic to mic', cx, cy + 16);
+  if (shown !== null){
+    var age = (performance.now() - lastValid) / 1000;
+    g.globalAlpha = age < 1 ? 1 : Math.max(0.25, 1 - (age - 1) / 3);
+    t = (els.mirror.checked ? -shown : shown) * Math.PI / 180;
+    g.strokeStyle = accent; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.sin(t) * (R - 12), cy - Math.cos(t) * (R - 12)); g.stroke();
+    g.fillStyle = accent; g.beginPath(); g.arc(cx + Math.sin(t) * (R - 12), cy - Math.cos(t) * (R - 12), 6, 0, 2 * Math.PI); g.fill();
+    g.globalAlpha = 1;
+  }
+  g.fillStyle = ink;
+}
+
+function drawCorr(){
+  var f = fit(els.corr), g = f.g, w = f.w, h = f.h, pad = 16;
+  var muted = tok('--muted'), line = tok('--line'), accent = tok('--accent');
+  g.clearRect(0, 0, w, h);
+  var base = h - pad - 4, top = 8, i, n, x, y;
+  g.strokeStyle = line; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, base); g.lineTo(w, base); g.moveTo(w / 2, top); g.lineTo(w / 2, base); g.stroke();
+  g.font = '11px ' + tok('--sans'); g.fillStyle = muted; g.textBaseline = 'alphabetic';
+  var span = lastL ? Math.round(lastL / (UP * fsNow) * 1e6) : 0;
+  g.textAlign = 'left'; g.fillText(span ? '-' + span + ' µs' : '', 0, h - 2);
+  g.textAlign = 'center'; g.fillText('0', w / 2, h - 2);
+  g.textAlign = 'right'; g.fillText(span ? '+' + span + ' µs' : '', w, h - 2);
+  if (!lastCorr) return;
+  n = lastCorr.length;
+  g.strokeStyle = accent; g.lineWidth = 1.5; g.beginPath();
+  for (i = 0; i < n; i++){
+    x = i / (n - 1) * w; y = base - Math.max(-0.15, Math.min(1, lastCorr[i])) * (base - top);
+    if (i) g.lineTo(x, y); else g.moveTo(x, y);
+  }
+  g.stroke();
+}
+
+function describe(deg){
+  var a = Math.abs(deg);
+  if (a < 3) return 'Square-on to the phone';
+  return 'Toward the channel ' + (deg > 0 ? '2' : '1') + ' microphone';
+}
+
+function onBlock(l, r, fs){
+  fsNow = fs;
+  var d = spacingM(), res = analyse(l, r, 0, fs, d);
+  els.rL1.textContent = db(res.rms1); els.rL2.textContent = db(res.rms2);
+  if (res.mono){
+    recent = []; lastCorr = null;
+    setStatus('Both channels carry the same signal, so this browser is passing only one microphone. Direction cannot be measured here.', true);
+    els.rConf.textContent = '--'; els.rDelay.textContent = '--';
+    return;
+  }
+  lastCorr = res.corr; lastL = res.L;
+  els.rConf.textContent = Math.round(Math.max(0, res.conf) * 100) + '%';
+  if (Math.max(res.rms1, res.rms2) < MIN_RMS || res.conf < MIN_CONF){
+    setStatus('Listening. Clap or snap your fingers.', false);
+    return;
+  }
+  recent.push(res.tau); if (recent.length > 5) recent.shift();
+  var tau = median(recent), ang = tauToAngle(tau, d);
+  shown = ang.deg; lastValid = performance.now();
+  els.angle.textContent = Math.abs(ang.deg).toFixed(0) + '°';
+  els.toward.textContent = describe(ang.deg);
+  els.rDelay.textContent = (tau * 1e6).toFixed(0) + ' µs';
+  setStatus(ang.over ? 'Delay is longer than the microphone spacing allows. Increase the spacing setting.' : 'Sound located.', ang.over);
+}
+
+function frame(){
+  drawDial(); drawCorr();
+  if (running) requestAnimationFrame(frame);
+}
+
+function stopAll(){
+  running = false;
+  try { if (proc){ proc.onaudioprocess = null; proc.disconnect(); } } catch (e) {}
+  try { if (src) src.disconnect(); } catch (e) {}
+  try { if (sink) sink.disconnect(); } catch (e) {}
+  if (stream) stream.getTracks().forEach(function(t){ t.stop(); });
+  if (ctx) ctx.close().catch(function(){});
+  ctx = stream = proc = src = sink = null;
+  els.start.disabled = false; els.stop.disabled = true;
+  drawDial(); drawCorr();
+}
+
+function start(){
+  els.start.disabled = true;
+  setStatus('Asking for the microphone.', false);
+  var want = { audio: { channelCount: { ideal: 2 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+  navigator.mediaDevices.getUserMedia(want).then(function(s){
+    stream = s;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC();
+    var track = s.getAudioTracks()[0], set = track.getSettings ? track.getSettings() : {};
+    src = ctx.createMediaStreamSource(s);
+    proc = ctx.createScriptProcessor(N, 2, 2);
+    sink = ctx.createGain(); sink.gain.value = 0;
+    var chans = 0;
+    proc.onaudioprocess = function(e){
+      var ib = e.inputBuffer;
+      if (ib.numberOfChannels < 2){
+        setStatus('The browser delivered a single channel, so direction cannot be measured here.', true);
+        return;
+      }
+      if (!chans){ chans = ib.numberOfChannels; }
+      onBlock(ib.getChannelData(0), ib.getChannelData(1), ib.sampleRate);
+    };
+    src.connect(proc); proc.connect(sink); sink.connect(ctx.destination);
+    els.diag.textContent =
+      'Microphone: ' + (track.label || 'unnamed') + '\n' +
+      'Channels reported: ' + (set.channelCount !== undefined ? set.channelCount : 'not reported') + '\n' +
+      'Sample rate: ' + ctx.sampleRate + ' Hz\n' +
+      'Echo cancellation: ' + (set.echoCancellation !== undefined ? set.echoCancellation : 'not reported') + '\n' +
+      'Noise suppression: ' + (set.noiseSuppression !== undefined ? set.noiseSuppression : 'not reported') + '\n' +
+      'Automatic gain: ' + (set.autoGainControl !== undefined ? set.autoGainControl : 'not reported') + '\n' +
+      'All three should be false and channels should be 2.';
+    running = true; els.stop.disabled = false;
+    setStatus('Listening. Clap or snap your fingers.', false);
+    if (ctx.state === 'suspended') ctx.resume();
+    requestAnimationFrame(frame);
+  }).catch(function(err){
+    els.start.disabled = false;
+    var m = err && err.name === 'NotAllowedError' ? 'Microphone access was refused. Allow it in the browser\'s site settings and try again.'
+          : err && err.name === 'NotFoundError' ? 'No microphone was found.'
+          : 'Could not open the microphone: ' + (err && err.message ? err.message : err);
+    setStatus(m, true);
+  });
+}
+
+els.start.addEventListener('click', start);
+els.stop.addEventListener('click', function(){ stopAll(); setStatus('Stopped.', false); });
+els.mirror.addEventListener('change', drawDial);
+window.addEventListener('resize', function(){ drawDial(); drawCorr(); });
+
+if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+  els.start.disabled = true;
+  setStatus('Live listening is unavailable here. Open this page over HTTPS or from localhost, or analyse a recording below.', true);
+}
+
+/* recording analysis */
+function drawFile(points){
+  els.fileplot.hidden = false;
+  var f = fit(els.fileplot), g = f.g, w = f.w, h = f.h;
+  var muted = tok('--muted'), line = tok('--line'), accent = tok('--accent');
+  g.clearRect(0, 0, w, h);
+  var left = 34, top = 8, bottom = h - 16, tMax = points.length ? points[points.length - 1].t : 1, i, p;
+  g.strokeStyle = line; g.lineWidth = 1; g.font = '11px ' + tok('--sans'); g.fillStyle = muted; g.textBaseline = 'middle'; g.textAlign = 'right';
+  [-90, 0, 90].forEach(function(a){
+    var y = top + (90 - a) / 180 * (bottom - top);
+    g.beginPath(); g.moveTo(left, y); g.lineTo(w, y); g.stroke();
+    g.fillText((a > 0 ? '+' : '') + a + '°', left - 4, y);
+  });
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.fillText('0 s', left, h - 2);
+  g.textAlign = 'right'; g.fillText(tMax.toFixed(1) + ' s', w, h - 2);
+  g.fillStyle = accent;
+  for (i = 0; i < points.length; i++){
+    p = points[i]; if (!p.ok) continue;
+    g.beginPath(); g.arc(left + p.t / tMax * (w - left - 3), top + (90 - p.deg) / 180 * (bottom - top), 2.2, 0, 2 * Math.PI); g.fill();
+  }
+}
+
+els.file.addEventListener('change', function(){
+  var file = els.file.files && els.file.files[0];
+  if (!file) return;
+  els.fileStatus.className = 'status'; els.fileStatus.textContent = 'Reading the recording.';
+  var AC = window.AudioContext || window.webkitAudioContext, ac = new AC();
+  file.arrayBuffer().then(function(buf){
+    return new Promise(function(ok, bad){ ac.decodeAudioData(buf, ok, bad); });
+  }).then(function(audio){
+    ac.close().catch(function(){});
+    if (audio.numberOfChannels < 2){
+      els.fileStatus.className = 'status warn';
+      els.fileStatus.textContent = 'This recording has one channel. Record in stereo and try again.';
+      return;
+    }
+    var a = audio.getChannelData(0), b = audio.getChannelData(1), fs = audio.sampleRate, d = spacingM();
+    var len = Math.min(a.length, Math.floor(60 * fs)), hop = N / 2, points = [], taus = [], monoBlocks = 0, pos = 0;
+    function step(){
+      var end = Date.now() + 30, res, ang;
+      while (pos + N <= len && Date.now() < end){
+        res = analyse(a, b, pos, fs, d);
+        if (res.mono) monoBlocks++;
+        var ok = !res.mono && Math.max(res.rms1, res.rms2) >= MIN_RMS && res.conf >= MIN_CONF;
+        ang = tauToAngle(res.tau, d);
+        points.push({ t: pos / fs, deg: ang.deg, ok: ok });
+        if (ok) taus.push(res.tau);
+        pos += hop;
+      }
+      if (pos + N <= len){ setTimeout(step, 0); return; }
+      drawFile(points);
+      if (points.length && monoBlocks > points.length * 0.9){
+        els.fileStatus.className = 'status warn';
+        els.fileStatus.textContent = 'Both channels are identical, so the recorder saved one microphone twice. Use a recorder with raw stereo.';
+      } else if (!taus.length){
+        els.fileStatus.className = 'status warn';
+        els.fileStatus.textContent = 'No clear sounds found. Record claps or snaps closer to the phone.';
+      } else {
+        var m = median(taus), md = tauToAngle(m, d);
+        els.fileStatus.className = 'status';
+        els.fileStatus.textContent = taus.length + ' clear readings. Median ' + Math.abs(md.deg).toFixed(0) + '° ' +
+          describe(md.deg).toLowerCase() + ', delay ' + (m * 1e6).toFixed(0) + ' µs.';
+      }
+    }
+    step();
+  }).catch(function(){
+    els.fileStatus.className = 'status warn';
+    els.fileStatus.textContent = 'This file could not be decoded. Try a WAV file.';
+  });
+});
+
+drawDial(); drawCorr();
+</script>
+</body>
+</html>
